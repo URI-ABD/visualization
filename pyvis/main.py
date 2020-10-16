@@ -2,7 +2,7 @@ import numpy as np
 import os
 from pyclam import Manifold, criterion
 
-from visualizer import Visualizer
+from pyvis.visualizer import Visualizer
 
 PLOTS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), 'plots'))
 
