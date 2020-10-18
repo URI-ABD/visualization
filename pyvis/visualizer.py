@@ -1,16 +1,11 @@
-from typing import Dict, Set, Union
+from typing import Tuple
 
-import numpy as np
-from matplotlib import pyplot as plt
-from pyclam import Cluster, Graph
-from sympy import symbols, Eq, solve
-from sympy.core.mul import Mul
+from pyclam import Manifold, Graph, Cluster
 
 
-class Vector:
+class Force:
     def __init__(self, x: float, y: float):
         self._x, self._y = x, y
-        self.cache: Dict[str, any] = dict()
 
     @property
     def x(self) -> float:
@@ -20,144 +15,112 @@ class Vector:
     def y(self) -> float:
         return self._y
 
-    def __add__(self, other: 'Vector') -> 'Vector':
-        return Vector(self.x + other.x, self.y + other.y)
+    def __str__(self):
+        return f'({self.x:.2f}, {self.y:.2f})'
 
-    def __sub__(self, other: 'Vector') -> 'Vector':
-        return Vector(self.x - other.x, self.y - other.y)
+    def __repr__(self):
+        return str(self)
+    
+    def __neg__(self) -> 'Force':
+        return Force(-self.x, -self.y)
 
-    def __mul__(self, scale: float) -> 'Vector':
-        return Vector(self.x * scale, self.y * scale)
+    def __add__(self, other: 'Force') -> 'Force':
+        return Force(self.x + other.x, self.y + other.y)
 
-    def __neg__(self) -> 'Vector':
-        return Vector(-self.x, -self.y)
+    def __sub__(self, other: 'Force') -> 'Force':
+        return self + (-other)
+
+
+class Point:
+    def __init__(self, index: int, x: float, y: float, mass: float = 1):
+        self.index: int = index
+        self._x, self._y = x, y
+        self.mass: float = mass
+
+    def __eq__(self, other: 'Point'):
+        return self.index == other.index
+
+    def __str__(self):
+        return f'({self.x:.2f}, {self.y:.2f})'
+
+    def __repr__(self):
+        return f'index: {self.index}, location: {str(self)}, mass: {self.mass}'
+
+    def __hash__(self):
+        return self.index
 
     @property
-    def magnitude(self) -> float:
-        if 'magnitude' not in self.cache:
-            self.cache['magnitude'] = (self.x ** 2 + self.y ** 2) ** 0.5
-        return self.cache['magnitude']
+    def x(self) -> float:
+        return self._x
 
-    def unit(self) -> 'Vector':
-        return Vector(self.x / self.magnitude, self.y / self.magnitude) if self.magnitude > 0 else Vector(0, 0)
+    @property
+    def y(self) -> float:
+        return self._y
+
+    @property
+    def location(self) -> Tuple[float, float]:
+        return self.x, self.y
+
+    def move(self, force: Force) -> 'Point':
+        self._x = self.x + force.x / self.mass
+        self._y = self.y + force.y / self.mass
+        return self
+
+    def difference(self, other: 'Point') -> Tuple[float, float]:
+        return self.x - other.x, self.y - other.y
+
+    def distance(self, other: 'Point') -> float:
+        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
 
 
 class Spring:
-    def __init__(self, source: Cluster, destination: Cluster, length: float, constant: float = 1.):
-        self._source, self._destination = source, destination
-        self._length, self._constant = length, constant
+    def __init__(self, left: Point, right: Point, rest_length: float, stiffness: float = 1):
+        if left == right:
+            raise ValueError(f'left and right must be different points.')
+        elif left.index < right.index:
+            self.left, self.right = left, right
+        else:
+            self.left, self.right = right, left
+        self.rest_length: float = rest_length
+        self.stiffness: float = stiffness
 
-    @property
-    def source(self) -> Cluster:
-        return self._source
+    def __str__(self):
+        return f'{self.left}, {self.right}, {self.rest_length:.2f}, {self.stiffness}'
 
-    @property
-    def destination(self) -> Cluster:
-        return self._destination
+    def __repr__(self):
+        return f'left: {self.left}, right: {self.right}, rest length: {self.rest_length}, stiffness: {self.stiffness}'
+
+    def __hash__(self):
+        i, j = self.right.index, self.left.index
+        return (i * (i - 1)) // 2 + j + 1
 
     @property
     def length(self) -> float:
-        return self._length
+        return self.left.distance(self.right)
 
-    @property
-    def constant(self) -> float:
-        return self._constant
+    def direction(self, anchor: str = 'left') -> Tuple[float, float]:
+        if anchor not in ['left', 'right']:
+            raise ValueError(f'Direction must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
+        direction: Tuple[float, float] = self.left.difference(self.right)
+        distance: float = self.left.distance(self.right)
+        sign = 1 if anchor == 'left' else -1
+        return sign * direction[0] / distance, sign * direction[1] / distance
 
-    def __contains__(self, item: Cluster) -> bool:
-        return item.argcenter == self.source
-
-    def force(self, left: Vector, right: Vector) -> Vector:
-        return (left - right).unit() * ((left - right).magnitude - self.length) * self.constant
+    def force(self, anchor: str = 'left') -> Force:
+        if anchor not in ['left', 'right']:
+            raise ValueError(f'Force must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
+        magnitude: float = -self.stiffness * (self.length - self.rest_length)
+        direction: Tuple[float, float] = self.direction(anchor)
+        return Force(magnitude * direction[0], magnitude * direction[1])
 
 
 class Visualizer:
-    def __init__(self, root: Cluster, graph: Graph):
-        self.root: Cluster = root
-        self.graph: Graph = graph
+    def __init__(self, manifold: Manifold):
+        self.manifold: Manifold = manifold
+        self.root: Cluster = manifold.root
 
-        self.vertices: Set[Cluster] = {root}
-        self.locations: Dict[int, Vector] = {root.argcenter: Vector(0, 0)}
-        self.springs: Set[Spring] = set()
-
-        self._replaced: Set[Cluster] = set()
+    def force_direct(self, graph: Graph):
+        pass
 
     def draw(self, filename: str):
-        xy = np.asarray([(self.locations[cluster.argcenter].x, self.locations[cluster.argcenter].y) for cluster in self.graph], dtype=float)
-
-        plt.clf()
-        fig = plt.figure(figsize=(16, 10), dpi=200)
-        fig.add_subplot(111)
-        plt.scatter(xy[:, 0], xy[:, 1], s=4)
-
-        plt.title('getting started')
-        plt.savefig(filename, bbox_inches='tight', pad_inches=0.25)
-        plt.close('all')
-        return
-
-    def _replace_with_children(self, pivot: Cluster):
-        # TODO: cascade change of Spring to take cluster instead of index of cluster-center
-        # TODO: find some other way of managing different clusters having the same center
-        [left, right] = list(pivot.children)
-        px, py = self.locations[pivot.argcenter].x, self.locations[pivot.argcenter].y
-        [pl, pr] = list(pivot.distance_from([left.argcenter, right.argcenter]))
-        [lr] = list(left.distance_from(right.argcenter))
-        self.springs.add(Spring(left.argcenter, right.argcenter, lr, 1))
-
-        if left.argcenter in self.locations:
-            rx, ry = px + pr, py
-            self.locations[right.argcenter] = Vector(rx, ry)
-            self.springs.add(Spring(pivot.argcenter, right.argcenter, pr, 1))
-            self.springs.add(Spring(right.argcenter, pivot.argcenter, pr, 1))
-        elif right.argcenter in self.locations:
-            lx, ly = px + pl, py
-            self.locations[left.argcenter] = Vector(lx, ly)
-            self.springs.add(Spring(pivot.argcenter, left.argcenter, pl, 1))
-            self.springs.add(Spring(left.argcenter, pivot.argcenter, pl, 1))
-        elif (left.argcenter in self.locations) and (right.argcenter in self.locations):
-            pass
-        else:
-            lx, ly = px + pl, py
-
-            x, y = symbols('x'), symbols('y')
-            eq1 = Eq((x - px) ** 2 + (y - py) ** 2, pr ** 2)
-            eq2 = Eq((x - lx) ** 2 + (y - ly) ** 2, lr ** 2)
-            solutions = [(sx, sy) for sx, sy in solve((eq1, eq2), (x, y)) if not (isinstance(sx, Mul) or isinstance(sy, Mul))]
-
-            rx, ry = solutions[0]
-
-            self.locations[left.argcenter] = Vector(lx, ly)
-            self.springs.add(Spring(pivot.argcenter, left.argcenter, pl, 1))
-            self.springs.add(Spring(left.argcenter, pivot.argcenter, pl, 1))
-
-            self.locations[right.argcenter] = Vector(rx, ry)
-            self.springs.add(Spring(pivot.argcenter, right.argcenter, pr, 1))
-            self.springs.add(Spring(right.argcenter, pivot.argcenter, pr, 1))
-
-        self.vertices.update({left, right})
-        return
-
-    def _optimize(self, movers: Union[Set[Cluster], str] = 'all'):
-        if isinstance(movers, str):
-            if movers == 'all':
-                movers: Set[Cluster] = {vertex for vertex in self.vertices}
-            else:
-                raise ValueError(f'movers must be a set of Clusters or must be the string \'all\'. Got {movers} instead.')
-
-        forces: Dict[Cluster, Vector] = {cluster: Vector(0, 0) for cluster in movers}
-        for cluster in movers:
-            springs: Set[Spring] = {spring for spring in self.springs if cluster in spring}
-            for spring in springs:
-                pass
-            pass
-        return
-
-    def force_direct(self):
-        replacements: Set[Cluster] = {cluster for cluster in self.vertices if (cluster not in self.graph) and (cluster not in self._replaced)}
-
-        while replacements:
-            for cluster in replacements:
-                self._replace_with_children(cluster)
-            self._replaced.update(replacements)
-            replacements = {cluster for cluster in self.vertices if (cluster not in self.graph) and (cluster not in self._replaced)}
-        [print(spring) for spring in self.springs]
-        return
+        pass

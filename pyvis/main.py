@@ -11,9 +11,8 @@ def main():
     filename = os.path.join(PLOTS_PATH, 'test.png')
     data = np.asarray([[1, 1], [2, 2], [1, 2], [2, 1]], dtype=float)
     manifold: Manifold = Manifold(data, 'euclidean').build(criterion.MaxDepth(10))
-    print(manifold.layers[-1])
-    vis = Visualizer(manifold.root, manifold.layers[-1])
-    vis.force_direct()
+    vis = Visualizer(manifold)
+    vis.force_direct(manifold.layers[-1])
     vis.draw(filename)
     return
 
