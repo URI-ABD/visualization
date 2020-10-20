@@ -1,9 +1,10 @@
 import time
 from typing import Tuple, Set, Optional, Dict, List
-
+import numpy as np
 import streamlit as st
 from matplotlib.pyplot import Figure, Axes
 from pyclam import Manifold, Graph, Cluster
+import sympy
 
 from pyvis.utils import key
 
@@ -93,6 +94,9 @@ class Point:
     def location(self) -> Tuple[float, float]:
         return self.x, self.y
 
+    def translate(self, vector: Vector) -> Vector:
+        return Vector(self.x + vector.x, self.y + vector.y)
+
     def move(self, force: Vector) -> 'Point':
         self._x = self.x + force.x / self.mass
         self._y = self.y + force.y / self.mass
@@ -135,6 +139,7 @@ class Spring:
         return self.left.distance(self.right)
 
     def direction(self, anchor: str = 'left') -> Vector:
+        """ Returns a unit direction vector from anchor. """
         if anchor not in ['left', 'right']:
             raise ValueError(f'Direction must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
         left, right = Vector(*self.left.location), Vector(*self.right.location)
@@ -181,62 +186,100 @@ class Visualizer:
         # cluster must already by in the visualized set
         if cluster.argcenter not in self.points:
             raise ValueError(f'when adding a triangle, the expanding cluster must already be in the visualized set.')
-        pivot = self.points[cluster.argcenter]
 
         # build triangle with vertices that are cluster.center, left.center, right.center
-        left_child: Cluster
-        right_child: Cluster
-        [left_child, right_child] = list(cluster.children)
-        [pl_distance, pr_distance] = list(cluster.distance_from([left_child.argcenter, right_child.argcenter]))
-        [lr_distance] = list(left_child.distance_from([right_child.argcenter]))
+        left: Cluster
+        right: Cluster
+        [left, right] = list(cluster.children)
 
-        if (left_child.argcenter in self.points) and (right_child.argcenter in self.points):
-            # neither of the children provides a new point
-            left_point, right_point = self.points[left_child.argcenter], self.points[right_child.argcenter]
+        # high-dim distances for triangle
+        [cl, cr] = list(cluster.distance_from([left.argcenter, right.argcenter]))
+        [rl] = list(right.distance_from([left.argcenter]))
+
+        if (left.argcenter in self.points) and (right.argcenter in self.points):  # neither of the children provides a new point
+            left_point, right_point = self.points[left.argcenter], self.points[right.argcenter]
 
             # add springs between trio of points
-            self._add_spring(Spring(pivot, left_point, pl_distance))
-            self._add_spring(Spring(pivot, right_point, pr_distance))
-            self._add_spring(Spring(left_point, right_point, lr_distance))
+            self._add_spring(Spring(self.points[cluster.argcenter], left_point, cl))
+            self._add_spring(Spring(self.points[cluster.argcenter], right_point, cr))
+            self._add_spring(Spring(left_point, right_point, rl))
 
             [self._add_springs(child) for child in cluster.children]
 
             self.draw(fig, text='no new points added')
 
-        elif (left_child.argcenter in self.points) or (right_child.argcenter in self.points):
-            # only one of left/right is a new point,
-            left_pivot, right_pivot, new_point = pivot, self.points[left_child.argcenter], self.points[right_child.argcenter]
-            if right_child.argcenter in self.points:
-                right_pivot, new_point = new_point, right_pivot
+        elif (left.argcenter in self.points) or (right.argcenter in self.points):  # only one of left/right is a new point
+            if right.argcenter in self.points:
+                # right child is the designated new cluster, so swap clusters and distances
+                left, right = right, left
+                cl, cr = cr, cl
 
-            axis: Spring = self.springs[key(left_pivot.index, right_pivot.index)]
-            triangle_sides = (axis.length, new_point.distance(left_pivot), new_point.distance(right_pivot))
-            if triangle_sides[0] < triangle_sides[1] + triangle_sides[2]:
-                # triangle inequality holds.
-                # add new point to visualized set, and add all implied springs
-                # for now, the two intersection points of circles and choose the one with the lower net force from springs
+            neighbors: List[Tuple[Point, float]] = [
+                (self.points[candidate.argcenter], distance) for candidate, distance in right.candidates.items()
+                if candidate.argcenter in self.points and distance <= right.radius + candidate.radius
+            ]
 
-                # later, rotate triangle about axis
+            if cluster.argcenter == right.argcenter:  # cluster center is the same as a child center
+                # TODO: 2-d rotational dynamics of rigid bar rotating about one end
+                # rigid rod connects cluster and right. solve dynamical system.
+                # TODO: 3-d rotational dynamics of rigid bar rotating about one end
                 pass
-            else:
-                # triangle inequality is broken.
-                # Add new point somewhere along the axis in-between the pivots.
+
+            triangle: List[float] = list(sorted((cl, cr, rl)))
+            if triangle[2] < triangle[1] + triangle[0]:  # triangle inequality holds.
+                # TODO: 3-D rotate triangle about axis
+
+                # solve for two solutions for where to place new point
+                (xc, yc), (xl, yl) = self.points[cluster.argcenter].location, self.points[left.argcenter].location
+                x, y = sympy.symbols('x y')
+                eq1 = sympy.Eq((x - xc) ** 2 + (y - yc) ** 2, cr ** 2)
+                eq2 = sympy.Eq((x - xl) ** 2 + (y - yl) ** 2, rl ** 2)
+                solutions: List[Tuple[float, float]] = [
+                    (sx, sy) for sx, sy in sympy.solve((eq1, eq2), (x, y))
+                    if not (isinstance(sx, sympy.Mul) or isinstance(sy, sympy.Mul))
+                ]
+
+                assert len(solutions) == 2, 'did not find exactly two real-valued solutions for triangle inequality case'
+
+                # Find the solution which gives the least net force
+                forces: List[float] = list()
+                for xr, yr in solutions:
+                    new_point = Point(right.argcenter, xr, yr)
+                    springs: List[Spring] = [Spring(new_point, neighbor, distance) for neighbor, distance in neighbors]
+                    forces.append(sum((spring.force('right') for spring in springs)).magnitude)
+
+                xr, yr = solutions[int(np.argmin(forces))]
+                self.points[right.argcenter] = Point(right.argcenter, xr, yr)
+                [self._add_spring(Spring(self.points[right.argcenter], neighbor, distance)) for neighbor, distance in neighbors]
+
+            else:  # triangle inequality is broken.
+                # TODO: Find out whether right should be between cluster and left, or off to one side
+                # Add new point somewhere along the axis of the pivots.
                 # low-dim distances to each pivot should preserve ratio of high-dim distances to each pivot
-                pass
-            self.draw(fig, text=f'one new point added: {new_point}')
+                if cl > max(cr, rl):
+                    axis: Spring = self.springs[key(cluster.argcenter, left.argcenter)]
+                    location: Vector = axis.left.translate(axis.direction('left') * cl * cr / rl)
+                    self.points[right.argcenter] = Point(right.argcenter, location.x, location.y)
+                elif cr > max(cl, rl):
+                    pass
+                else:
+                    pass
+
+            self.draw(fig, text=f'one new point added: {self.points[right.argcenter]}')
 
         else:
             # left and right both provide new points
+            pivot: Point = self.points[cluster.argcenter]
             # for now, solve 2-d rotational dynamics of triangle
             # triangle will rotate about pivot until net torque is zero
             # figure out translation of force from acting on left point to acting on the right point
             # rotate right point using the resultant force, then recover left point
             # loop until net torque after translation is nearly zero
 
-            # later, solve rotational dynamics of 3-d rigid triangle anchored at one vertex
+            # TODO: 3-D solve rotational dynamics of rigid triangle anchored at one vertex
             # https://math.stackexchange.com/questions/871867/rotation-matrix-of-triangle-in-3d
             # https://en.wikipedia.org/wiki/Rodrigues'_rotation_formula
-            self.draw(fig, text=f'two new points added: {left_child.argcenter}, {right_child.argcenter}')
+            self.draw(fig, text=f'two new points added: {left.argcenter}, {right.argcenter}')
 
         return
 
