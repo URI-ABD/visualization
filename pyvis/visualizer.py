@@ -213,17 +213,25 @@ class Visualizer:
             triangle_sides = (axis.length, new_point.distance(left_pivot), new_point.distance(right_pivot))
             if triangle_sides[0] < triangle_sides[1] + triangle_sides[2]:
                 # triangle inequality holds.
-                # add new point and rotate triangle about axis
+                # add new point to visualized set, and add all implied springs
+                # for now, the two intersection points of circles and choose the one with the lower net force from springs
+
+                # later, rotate triangle about axis
                 pass
             else:
                 # triangle inequality is broken.
                 # Add new point somewhere along the axis in-between the pivots.
+                # low-dim distances to each pivot should preserve ratio of high-dim distances to each pivot
                 pass
             self.draw(fig, text=f'one new point added: {new_point}')
 
         else:
             # left and right both provide new points
             # for now, solve 2-d rotational dynamics of triangle
+            # triangle will rotate about pivot until net torque is zero
+            # figure out translation of force from acting on left point to acting on the right point
+            # rotate right point using the resultant force, then recover left point
+            # loop until net torque after translation is nearly zero
 
             # later, solve rotational dynamics of 3-d rigid triangle anchored at one vertex
             # https://math.stackexchange.com/questions/871867/rotation-matrix-of-triangle-in-3d
