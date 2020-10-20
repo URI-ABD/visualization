@@ -1,5 +1,5 @@
 import time
-from typing import Tuple, Set, Optional, Dict
+from typing import Tuple, Set, Optional, Dict, List
 
 import streamlit as st
 from matplotlib.pyplot import Figure, Axes
@@ -8,7 +8,7 @@ from pyclam import Manifold, Graph, Cluster
 from pyvis.utils import key
 
 
-class Force:
+class Vector:
     def __init__(self, x: float, y: float):
         self._x, self._y = x, y
 
@@ -26,14 +26,31 @@ class Force:
     def __repr__(self):
         return str(self)
     
-    def __neg__(self) -> 'Force':
-        return Force(-self.x, -self.y)
+    def __neg__(self) -> 'Vector':
+        return Vector(-self.x, -self.y)
 
-    def __add__(self, other: 'Force') -> 'Force':
-        return Force(self.x + other.x, self.y + other.y)
+    def __add__(self, other: 'Vector') -> 'Vector':
+        return Vector(self.x + other.x, self.y + other.y)
 
-    def __sub__(self, other: 'Force') -> 'Force':
+    def __sub__(self, other: 'Vector') -> 'Vector':
         return self + (-other)
+
+    def __mul__(self, scalar: float) -> 'Vector':
+        """ multiply with scalar. """
+        return Vector(self.x * scalar, self.y * scalar)
+
+    @property
+    def magnitude(self) -> float:
+        return (self.x ** 2 + self.y ** 2) ** 0.5
+
+    @property
+    def perpendicular(self) -> 'Vector':
+        """ Returns a Perpendicular Unit-Vector to self. """
+        return Vector(self.y, -self.x) * (1 / self.magnitude)
+
+    def dot(self, other: 'Vector') -> float:
+        """ Dot-Product with other vector. """
+        return self.x * other.x + self.y + other.y
 
     def draw(self, anchor: 'Point', ax: Axes):
         tip_x, tip_y = self.x - anchor.x, self.y - anchor.y
@@ -76,7 +93,7 @@ class Point:
     def location(self) -> Tuple[float, float]:
         return self.x, self.y
 
-    def move(self, force: Force) -> 'Point':
+    def move(self, force: Vector) -> 'Point':
         self._x = self.x + force.x / self.mass
         self._y = self.y + force.y / self.mass
         return self
@@ -117,20 +134,17 @@ class Spring:
     def length(self) -> float:
         return self.left.distance(self.right)
 
-    def direction(self, anchor: str = 'left') -> Tuple[float, float]:
+    def direction(self, anchor: str = 'left') -> Vector:
         if anchor not in ['left', 'right']:
             raise ValueError(f'Direction must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
-        direction: Tuple[float, float] = self.left.difference(self.right)
-        distance: float = self.left.distance(self.right)
-        sign = 1 if anchor == 'left' else -1
-        return sign * direction[0] / distance, sign * direction[1] / distance
+        left, right = Vector(*self.left.location), Vector(*self.right.location)
+        direction = left - right
+        return direction * (1 if anchor == 'left' else -1) * (1 / direction.magnitude)
 
-    def force(self, anchor: str = 'left') -> Force:
+    def force(self, anchor: str = 'left') -> Vector:
         if anchor not in ['left', 'right']:
             raise ValueError(f'Force must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
-        magnitude: float = -self.stiffness * (self.length - self.rest_length)
-        direction: Tuple[float, float] = self.direction(anchor)
-        return Force(magnitude * direction[0], magnitude * direction[1])
+        return self.direction(anchor) * -self.stiffness * (self.length - self.rest_length)
 
     def draw(self, ax: Axes):
         ax.plot([self.left.x, self.right.x], [self.left.y, self.right.y])
@@ -147,9 +161,20 @@ class Visualizer:
         self.springs: Dict[int, Spring] = dict()
         self.clusters: Set[Cluster] = set()
 
+    def _springs_from(self, point: Point) -> List[Spring]:
+        """ Returns a list of those springs that contain point as one end. """
+        return [self.springs[k] for other in self.points if (k := key(point.index, other)) in self.springs]
+
     def _add_spring(self, spring: Spring):
         if spring.key() not in self.springs:
             self.springs[spring.key()] = spring
+        return
+
+    def _add_springs(self, cluster: Cluster):
+        # This assumes that cluster is already in self.points
+        [self._add_spring(Spring(self.points[cluster.argcenter], self.points[candidate.argcenter], distance))
+         for candidate, distance in cluster.candidates.items()
+         if candidate.argcenter in self.points and distance <= cluster.radius + candidate.radius]
         return
 
     def _add_triangle(self, cluster: Cluster, fig: Optional[Figure] = None):
@@ -174,26 +199,35 @@ class Visualizer:
             self._add_spring(Spring(pivot, right_point, pr_distance))
             self._add_spring(Spring(left_point, right_point, lr_distance))
 
-            # good luck comprehending this list comprehension!
-            [self._add_spring(Spring(self.points[child.argcenter], self.points[candidate.argcenter], distance))
-             for child in cluster.children
-             for candidate, distance in child.candidates.items()
-             if candidate.argcenter in self.points and distance <= child.radius + candidate.radius]
+            [self._add_springs(child) for child in cluster.children]
 
             self.draw(fig, text='no new points added')
 
         elif (left_child.argcenter in self.points) or (right_child.argcenter in self.points):
             # only one of left/right is a new point,
-            left_pivot, right_pivot, new_point = pivot, left_child.argcenter, right_child.argcenter
+            left_pivot, right_pivot, new_point = pivot, self.points[left_child.argcenter], self.points[right_child.argcenter]
             if right_child.argcenter in self.points:
                 right_pivot, new_point = new_point, right_pivot
 
-            # use the triangle inequality to determine where to place the new point, and whether to rotate
-            # rotate the triangle about axis formed by two old points
+            axis: Spring = self.springs[key(left_pivot.index, right_pivot.index)]
+            triangle_sides = (axis.length, new_point.distance(left_pivot), new_point.distance(right_pivot))
+            if triangle_sides[0] < triangle_sides[1] + triangle_sides[2]:
+                # triangle inequality holds.
+                # add new point and rotate triangle about axis
+                pass
+            else:
+                # triangle inequality is broken.
+                # Add new point somewhere along the axis in-between the pivots.
+                pass
             self.draw(fig, text=f'one new point added: {new_point}')
 
         else:
-            # left and right both provide new points, solve rotational dynamics of 3-d rigid triangle
+            # left and right both provide new points
+            # for now, solve 2-d rotational dynamics of triangle
+
+            # later, solve rotational dynamics of 3-d rigid triangle anchored at one vertex
+            # https://math.stackexchange.com/questions/871867/rotation-matrix-of-triangle-in-3d
+            # https://en.wikipedia.org/wiki/Rodrigues'_rotation_formula
             self.draw(fig, text=f'two new points added: {left_child.argcenter}, {right_child.argcenter}')
 
         return
@@ -201,18 +235,21 @@ class Visualizer:
     def _local_optimization(self, cluster: Cluster, path_length: int, fig: Optional[Figure] = None):
         # find all points within path_length of children of cluster
         # these points are the active points
-        # find forces for active points and move each active point by the resultant force
-        # loop until reaching a minima
+        # determine proper step_size for 1 unit of force
+        # find and aggregate forces for each active point and move each active point by the resultant force
+        # loop until all resultants are nearly zero
         pass
 
     def _global_optimize(self, fig: Optional[Figure] = None):
         # from each spring, aggregate the forces on each point.
-        # then move all points by the resultant force
         # determine proper step_size for 1 unit of force
-        # loop until reaching a minima
+        # then move all points by the resultant force
+        # loop until resultants are nearly zero
         pass
 
     def force_direct(self, graph: Graph, *, fig: Optional[Figure] = None):
+        # TODO: figure out need for step-sizez
+        # TODO: think about any need for momentum and decay factor on momentum
         # breadth-first expansion from root, replacing each cluster with a triangle of cluster-left-right.
         self.clusters = {self.root}
         for depth in range(graph.depth):
