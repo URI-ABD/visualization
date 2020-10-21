@@ -46,12 +46,20 @@ class Vector:
 
     @property
     def perpendicular(self) -> 'Vector':
-        """ Returns a Perpendicular Unit-Vector to self. """
-        return Vector(self.y, -self.x) * (1 / self.magnitude)
+        """ Returns the first counter-clockwise Perpendicular Unit-Vector to self. """
+        return Vector(-self.y, self.x) * (1 / self.magnitude)
 
     def dot(self, other: 'Vector') -> float:
         """ Dot-Product with other vector. """
         return self.x * other.x + self.y + other.y
+
+    def cross(self, other: 'Vector') -> float:
+        """ Magnitude of cross-product between self and other. """
+        return self.x * other.y - self.y * other.x
+
+    def angle(self, other: 'Vector') -> float:
+        """ returns the angle in the counter clockwise direction from other to self. """
+        return float(np.arccos(self.dot(other) / (self.magnitude * other.magnitude)))
 
     def draw(self, anchor: 'Point', ax: Axes):
         tip_x, tip_y = self.x - anchor.x, self.y - anchor.y
@@ -62,7 +70,7 @@ class Vector:
 
 class Point:
     def __init__(self, index: int, x: float, y: float, mass: float = 1):
-        self.index: int = index
+        self._index: int = index
         self._x, self._y = x, y
         self.mass: float = mass
 
@@ -87,12 +95,16 @@ class Point:
         return self._y
 
     @property
-    def key(self) -> int:
-        return self.index
+    def index(self) -> int:
+        return self._index
 
     @property
     def location(self) -> Tuple[float, float]:
         return self.x, self.y
+
+    @property
+    def vector(self) -> Vector:
+        return Vector(self.x, self.y)
 
     def translate(self, vector: Vector) -> Vector:
         return Vector(self.x + vector.x, self.y + vector.y)
@@ -100,6 +112,19 @@ class Point:
     def move(self, force: Vector) -> 'Point':
         self._x = self.x + force.x / self.mass
         self._y = self.y + force.y / self.mass
+        return self
+
+    def rotate(self, pivot: 'Point', force: Vector) -> 'Point':
+        """ Rotate self around pivot by given force. """
+        direction: Vector = self.vector - pivot.vector
+        # force = mass * radius * angular_acceleration
+        alpha: float = force.magnitude / (self.mass * direction.magnitude)
+        # determine direction of force. whether clockwise or counter-clockwise
+        alpha *= (1 if direction.cross(force) > 0 else -1)
+        theta_0: float = direction.angle(Vector(1, 0))
+        theta: float = theta_0 + alpha / 2
+        self._x = pivot.x + direction.magnitude * np.cos(theta)
+        self._y = pivot.y + direction.magnitude * np.sin(theta)
         return self
 
     def difference(self, other: 'Point') -> Tuple[float, float]:
@@ -138,23 +163,23 @@ class Spring:
     def length(self) -> float:
         return self.left.distance(self.right)
 
-    def direction(self, anchor: str = 'left') -> Vector:
+    def direction(self, anchor: int) -> Vector:
         """ Returns a unit direction vector from anchor. """
-        if anchor not in ['left', 'right']:
-            raise ValueError(f'Direction must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
+        if anchor not in [self.left.index, self.right.index]:
+            raise ValueError(f'Direction must be anchored at one end of the spring. Got {anchor} instead.')
         left, right = Vector(*self.left.location), Vector(*self.right.location)
         direction = left - right
-        return direction * (1 if anchor == 'left' else -1) * (1 / direction.magnitude)
+        return direction * (1 if anchor == self.left.index else -1) * (1 / direction.magnitude)
 
-    def force(self, anchor: str = 'left') -> Vector:
-        if anchor not in ['left', 'right']:
-            raise ValueError(f'Force must be anchored at \'left\' or \'right\'. Got {anchor} instead.')
+    def force(self, anchor: int) -> Vector:
+        if anchor not in [self.left.index, self.right.index]:
+            raise ValueError(f'Direction must be anchored at one end of the spring. Got {anchor} instead.')
         return self.direction(anchor) * -self.stiffness * (self.length - self.rest_length)
 
     def draw(self, ax: Axes):
         ax.plot([self.left.x, self.right.x], [self.left.y, self.right.y])
         self.left.draw(ax), self.right.draw(ax)
-        self.force('left').draw(self.left, ax), self.force('right').draw(self.right, ax)
+        self.force(self.left.index).draw(self.left, ax), self.force(self.right.index).draw(self.right, ax)
         return
 
 
@@ -191,6 +216,7 @@ class Visualizer:
         left: Cluster
         right: Cluster
         [left, right] = list(cluster.children)
+        pivot: Point = self.points[cluster.argcenter]
 
         # high-dim distances for triangle
         [cl, cr] = list(cluster.distance_from([left.argcenter, right.argcenter]))
@@ -207,69 +233,88 @@ class Visualizer:
             [self._add_springs(child) for child in cluster.children]
 
             self.draw(fig, text='no new points added')
-
+            return
         elif (left.argcenter in self.points) or (right.argcenter in self.points):  # only one of left/right is a new point
             if right.argcenter in self.points:
-                # right child is the designated new cluster, so swap clusters and distances
+                # Right is the designated new cluster, so swap clusters and distances
                 left, right = right, left
                 cl, cr = cr, cl
+            else:
+                pass
 
+            # find all points that would imply springs from right
             neighbors: List[Tuple[Point, float]] = [
                 (self.points[candidate.argcenter], distance) for candidate, distance in right.candidates.items()
                 if candidate.argcenter in self.points and distance <= right.radius + candidate.radius
             ]
 
-            if cluster.argcenter == right.argcenter:  # cluster center is the same as a child center
-                # TODO: 2-d rotational dynamics of rigid bar rotating about one end
-                # rigid rod connects cluster and right. solve dynamical system.
+            if cluster.argcenter == right.argcenter:  # cluster center is the same as a Right center
+                # rigid rod connects cluster and right and rotates about cluster. solve dynamical system.
+                # pick starting point for Right
+                point: Point = Point(right.argcenter, pivot.x, pivot.y + cr)
+                # add Springs from Right
+                [self._add_spring(Spring(point, neighbor, distance)) for neighbor, distance in neighbors]
+                springs: List[Spring] = self._springs_from(point)
+                rod: Spring = self.springs[key(pivot.index, point.index)]
+                while True and point.mass < 1e3:  # rotate rod until moment is zero
+                    force: Vector = sum((spring.force(point.index) for spring in springs))
+                    if rod.direction(rod.left.index).cross(force) < 1e-3:
+                        # a force that is parallel or anti-parallel to the rod will produce no rotation
+                        break
+                    else:
+                        # rotate by some angle due to moment
+                        point.rotate(pivot, force)
+                        # increase mass to dampen next rotation magnitude
+                        point.mass += 1
+                point.mass = 1
+                self.points[point.index] = point
+
+                self.draw(fig, text=f'added and rotated rod with pivot {pivot.index} and point {point.index}')
                 # TODO: 3-d rotational dynamics of rigid bar rotating about one end
-                pass
+                return
+            else:  # a child has same center as a non-parent ancestor
+                if 2 * max(cl, cr, rl) < sum((cl, cr, rl)):  # triangle inequality holds.
+                    # solve for two solutions for where to place new point
+                    (xc, yc), (xl, yl) = self.points[cluster.argcenter].location, self.points[left.argcenter].location
+                    x, y = sympy.symbols('x y')
+                    eq1 = sympy.Eq((x - xc) ** 2 + (y - yc) ** 2, cr ** 2)
+                    eq2 = sympy.Eq((x - xl) ** 2 + (y - yl) ** 2, rl ** 2)
+                    solutions: List[Tuple[float, float]] = [
+                        (sx, sy) for sx, sy in sympy.solve((eq1, eq2), (x, y))
+                        if not (isinstance(sx, sympy.Mul) or isinstance(sy, sympy.Mul))
+                    ]
 
-            triangle: List[float] = list(sorted((cl, cr, rl)))
-            if triangle[2] < triangle[1] + triangle[0]:  # triangle inequality holds.
-                # TODO: 3-D rotate triangle about axis
+                    assert len(solutions) == 2, 'did not find exactly two real-valued solutions for triangle inequality case'
 
-                # solve for two solutions for where to place new point
-                (xc, yc), (xl, yl) = self.points[cluster.argcenter].location, self.points[left.argcenter].location
-                x, y = sympy.symbols('x y')
-                eq1 = sympy.Eq((x - xc) ** 2 + (y - yc) ** 2, cr ** 2)
-                eq2 = sympy.Eq((x - xl) ** 2 + (y - yl) ** 2, rl ** 2)
-                solutions: List[Tuple[float, float]] = [
-                    (sx, sy) for sx, sy in sympy.solve((eq1, eq2), (x, y))
-                    if not (isinstance(sx, sympy.Mul) or isinstance(sy, sympy.Mul))
-                ]
+                    # Find the solution which gives the least net force
+                    forces: List[float] = list()
+                    for xr, yr in solutions:
+                        new_point = Point(right.argcenter, xr, yr)
+                        springs: List[Spring] = [Spring(new_point, neighbor, distance) for neighbor, distance in neighbors]
+                        forces.append(sum((spring.force(spring.right.index) for spring in springs)).magnitude)
 
-                assert len(solutions) == 2, 'did not find exactly two real-valued solutions for triangle inequality case'
+                    xr, yr = solutions[int(np.argmin(forces))]
+                    self.points[right.argcenter] = Point(right.argcenter, xr, yr)
+                    [self._add_spring(Spring(self.points[right.argcenter], neighbor, distance)) for neighbor, distance in neighbors]
 
-                # Find the solution which gives the least net force
-                forces: List[float] = list()
-                for xr, yr in solutions:
-                    new_point = Point(right.argcenter, xr, yr)
-                    springs: List[Spring] = [Spring(new_point, neighbor, distance) for neighbor, distance in neighbors]
-                    forces.append(sum((spring.force('right') for spring in springs)).magnitude)
-
-                xr, yr = solutions[int(np.argmin(forces))]
-                self.points[right.argcenter] = Point(right.argcenter, xr, yr)
-                [self._add_spring(Spring(self.points[right.argcenter], neighbor, distance)) for neighbor, distance in neighbors]
-
-            else:  # triangle inequality is broken.
-                # TODO: Find out whether right should be between cluster and left, or off to one side
-                # Add new point somewhere along the axis of the pivots.
-                # low-dim distances to each pivot should preserve ratio of high-dim distances to each pivot
-                if cl > max(cr, rl):
+                    self.draw(fig, text=f'added new point {self.points[right.argcenter].index}, triangle inequality holds')
+                    # TODO: 3-D rotate triangle about axis
+                    return
+                else:  # triangle inequality is broken.
+                    # Add Right somewhere along the axis of the pivots.
+                    # low-dim distances to each pivot should preserve ratio of high-dim distances to each pivot
+                    center: Point = self.points[cluster.argcenter]
                     axis: Spring = self.springs[key(cluster.argcenter, left.argcenter)]
-                    location: Vector = axis.left.translate(axis.direction('left') * cl * cr / rl)
+                    # Right may be placed between Cluster and Left, or to the right of Cluster, or to the left of Left.
+                    ratio: float = cr / ((cr + rl) if cl > max(cr, rl) else (rl - cr) if cr < cl < rl else (cr - rl))
+                    # translate center in the direction of axis, by the proper ratio of length
+                    location: Vector = center.translate(axis.direction(center.index) * axis.length * ratio)
                     self.points[right.argcenter] = Point(right.argcenter, location.x, location.y)
-                elif cr > max(cl, rl):
-                    pass
-                else:
-                    pass
 
-            self.draw(fig, text=f'one new point added: {self.points[right.argcenter]}')
-
+                    self.draw(fig, text=f'one new point added: {self.points[right.argcenter].index}, triangle inequality was broken.')
+                    return
         else:
             # left and right both provide new points
-            pivot: Point = self.points[cluster.argcenter]
             # for now, solve 2-d rotational dynamics of triangle
             # triangle will rotate about pivot until net torque is zero
             # figure out translation of force from acting on left point to acting on the right point
@@ -295,11 +340,11 @@ class Visualizer:
         # from each spring, aggregate the forces on each point.
         # determine proper step_size for 1 unit of force
         # then move all points by the resultant force
-        # loop until resultants are nearly zero
+        # loop until resultants are nearly zro
         pass
 
     def force_direct(self, graph: Graph, *, fig: Optional[Figure] = None):
-        # TODO: figure out need for step-sizez
+        # TODO: figure out need for step-size
         # TODO: think about any need for momentum and decay factor on momentum
         # breadth-first expansion from root, replacing each cluster with a triangle of cluster-left-right.
         self.clusters = {self.root}
