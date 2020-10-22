@@ -207,6 +207,23 @@ class Visualizer:
          if candidate.argcenter in self.points and distance <= cluster.radius + candidate.radius]
         return
 
+    def _add_rod(self, pivot: Point, point: Point) -> Point:
+        # add Springs from Right
+        springs: List[Spring] = self._springs_from(point)
+        rod: Spring = self.springs[key(pivot.index, point.index)]
+        while True and point.mass < 1e3:  # rotate rod until moment is zero
+            force: Vector = sum((spring.force(point.index) for spring in springs))
+            if rod.direction(rod.left.index).cross(force) < 1e-3:
+                # a force that is parallel or anti-parallel to the rod will produce no rotation
+                break
+            else:
+                # rotate by some angle due to moment
+                point.rotate(pivot, force)
+                # increase mass to dampen next rotation magnitude
+                point.mass += 1
+        point.mass = 1
+        return point
+
     def _add_triangle(self, cluster: Cluster, fig: Optional[Figure] = None):
         # cluster must already by in the visualized set
         if cluster.argcenter not in self.points:
@@ -222,6 +239,24 @@ class Visualizer:
         [cl, cr] = list(cluster.distance_from([left.argcenter, right.argcenter]))
         [rl] = list(right.distance_from([left.argcenter]))
 
+        if right.argcenter in self.points:
+            # Right is the designated new cluster, so swap clusters and distances
+            left, right = right, left
+            cl, cr = cr, cl
+        else:
+            pass
+
+        def _add_along_axis():
+            # This preserves ratio of high-dimensional distances
+            _center: Point = self.points[cluster.argcenter]
+            _axis: Spring = self.springs[key(cluster.argcenter, left.argcenter)]
+            # Right may be placed between Cluster and Left, or to the right of Cluster, or to the left of Left.
+            _ratio: float = cr / ((cr + rl) if cl > max(cr, rl) else (rl - cr) if cr < cl < rl else (cr - rl))
+            # translate center in the direction of axis, by the proper ratio of length
+            _location: Vector = _center.translate(_axis.direction(_center.index) * _axis.length * _ratio)
+            self.points[right.argcenter] = Point(right.argcenter, _location.x, _location.y)
+            return
+
         if (left.argcenter in self.points) and (right.argcenter in self.points):  # neither of the children provides a new point
             left_point, right_point = self.points[left.argcenter], self.points[right.argcenter]
 
@@ -229,51 +264,28 @@ class Visualizer:
             self._add_spring(Spring(self.points[cluster.argcenter], left_point, cl))
             self._add_spring(Spring(self.points[cluster.argcenter], right_point, cr))
             self._add_spring(Spring(left_point, right_point, rl))
-
-            [self._add_springs(child) for child in cluster.children]
+            self._add_springs(left), self._add_springs(right)
 
             self.draw(fig, text='no new points added')
             return
         elif (left.argcenter in self.points) or (right.argcenter in self.points):  # only one of left/right is a new point
-            if right.argcenter in self.points:
-                # Right is the designated new cluster, so swap clusters and distances
-                left, right = right, left
-                cl, cr = cr, cl
-            else:
-                pass
-
-            # find all points that would imply springs from right
-            neighbors: List[Tuple[Point, float]] = [
-                (self.points[candidate.argcenter], distance) for candidate, distance in right.candidates.items()
-                if candidate.argcenter in self.points and distance <= right.radius + candidate.radius
-            ]
-
             if cluster.argcenter == right.argcenter:  # cluster center is the same as a Right center
                 # rigid rod connects cluster and right and rotates about cluster. solve dynamical system.
                 # pick starting point for Right
-                point: Point = Point(right.argcenter, pivot.x, pivot.y + cr)
-                # add Springs from Right
-                [self._add_spring(Spring(point, neighbor, distance)) for neighbor, distance in neighbors]
-                springs: List[Spring] = self._springs_from(point)
-                rod: Spring = self.springs[key(pivot.index, point.index)]
-                while True and point.mass < 1e3:  # rotate rod until moment is zero
-                    force: Vector = sum((spring.force(point.index) for spring in springs))
-                    if rod.direction(rod.left.index).cross(force) < 1e-3:
-                        # a force that is parallel or anti-parallel to the rod will produce no rotation
-                        break
-                    else:
-                        # rotate by some angle due to moment
-                        point.rotate(pivot, force)
-                        # increase mass to dampen next rotation magnitude
-                        point.mass += 1
-                point.mass = 1
-                self.points[point.index] = point
-
-                self.draw(fig, text=f'added and rotated rod with pivot {pivot.index} and point {point.index}')
+                self.points[right.argcenter] = Point(right.argcenter, pivot.x, pivot.y + cr)
+                self._add_springs(left), self._add_springs(right)
+                self._add_rod(pivot, self.points[right.argcenter])
+                self.draw(fig, text=f'added and rotated rod with pivot {pivot.index} and point {right.argcenter}')
                 # TODO: 3-d rotational dynamics of rigid bar rotating about one end
                 return
             else:  # a child has same center as a non-parent ancestor
                 if 2 * max(cl, cr, rl) < sum((cl, cr, rl)):  # triangle inequality holds.
+                    # find all points that would imply springs from right
+                    neighbors: List[Tuple[Point, float]] = [
+                        (self.points[candidate.argcenter], distance) for candidate, distance in right.candidates.items()
+                        if candidate.argcenter in self.points and distance <= right.radius + candidate.radius
+                    ]
+
                     # solve for two solutions for where to place new point
                     (xc, yc), (xl, yl) = self.points[cluster.argcenter].location, self.points[left.argcenter].location
                     x, y = sympy.symbols('x y')
@@ -294,37 +306,46 @@ class Visualizer:
                         forces.append(sum((spring.force(spring.right.index) for spring in springs)).magnitude)
 
                     xr, yr = solutions[int(np.argmin(forces))]
-                    self.points[right.argcenter] = Point(right.argcenter, xr, yr)
-                    [self._add_spring(Spring(self.points[right.argcenter], neighbor, distance)) for neighbor, distance in neighbors]
 
-                    self.draw(fig, text=f'added new point {self.points[right.argcenter].index}, triangle inequality holds')
+                    self.points[right.argcenter] = Point(right.argcenter, xr, yr)
+                    self._add_springs(left), self._add_springs(right)
+
+                    self.draw(fig, text=f'added new point {right.argcenter}, triangle inequality holds')
                     # TODO: 3-D rotate triangle about axis
                     return
                 else:  # triangle inequality is broken.
                     # Add Right somewhere along the axis of the pivots.
                     # low-dim distances to each pivot should preserve ratio of high-dim distances to each pivot
-                    center: Point = self.points[cluster.argcenter]
-                    axis: Spring = self.springs[key(cluster.argcenter, left.argcenter)]
-                    # Right may be placed between Cluster and Left, or to the right of Cluster, or to the left of Left.
-                    ratio: float = cr / ((cr + rl) if cl > max(cr, rl) else (rl - cr) if cr < cl < rl else (cr - rl))
-                    # translate center in the direction of axis, by the proper ratio of length
-                    location: Vector = center.translate(axis.direction(center.index) * axis.length * ratio)
-                    self.points[right.argcenter] = Point(right.argcenter, location.x, location.y)
-
-                    self.draw(fig, text=f'one new point added: {self.points[right.argcenter].index}, triangle inequality was broken.')
+                    _add_along_axis()
+                    self._add_springs(left), self._add_springs(right)
+                    self.draw(fig, text=f'one new point added: {right.argcenter}, triangle inequality was broken.')
                     return
         else:
             # left and right both provide new points
             # for now, solve 2-d rotational dynamics of triangle
-            # triangle will rotate about pivot until net torque is zero
-            # figure out translation of force from acting on left point to acting on the right point
-            # rotate right point using the resultant force, then recover left point
-            # loop until net torque after translation is nearly zero
+
+            if rl == cl + cr:  # triangle inequality was broken
+                _add_along_axis()
+                self.draw(fig, text=f'new triangle added: {right.argcenter}, triangle inequality was broken.')
+            else:  # triangle inequality holds
+                # triangle will rotate about pivot until net torque is zero
+
+                # add new points
+                cos_theta: float = (cl ** 2 + cr ** 2 - rl ** 2) / (2 * cl * cr)
+                sin_theta: float = (1 - cos_theta ** 2) ** 0.5
+                right_point: Point = Point(right.argcenter, pivot.x + cr, pivot.y)
+                left_point: Point = Point(left.argcenter, pivot.x + cl * cos_theta, pivot.y + cl * sin_theta)
+                self.points.update({left.argcenter: left_point, right.argcenter: right_point})
+                self._add_springs(left), self._add_springs(right)
+
+                # figure out translation of force from acting on left point to acting on the right point
+                # rotate right point using the resultant force, then recover left point
+                # loop until net torque after translation is nearly zero
+                self.draw(fig, text=f'two new points added: {left.argcenter}, {right.argcenter}. Triangle inequality holds')
 
             # TODO: 3-D solve rotational dynamics of rigid triangle anchored at one vertex
             # https://math.stackexchange.com/questions/871867/rotation-matrix-of-triangle-in-3d
             # https://en.wikipedia.org/wiki/Rodrigues'_rotation_formula
-            self.draw(fig, text=f'two new points added: {left.argcenter}, {right.argcenter}')
 
         return
 
