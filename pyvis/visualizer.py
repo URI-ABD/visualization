@@ -207,23 +207,6 @@ class Visualizer:
          if candidate.argcenter in self.points and distance <= cluster.radius + candidate.radius]
         return
 
-    def _add_rod(self, pivot: Point, point: Point) -> Point:
-        # add Springs from Right
-        springs: List[Spring] = self._springs_from(point)
-        rod: Spring = self.springs[key(pivot.index, point.index)]
-        while True and point.mass < 1e3:  # rotate rod until moment is zero
-            force: Vector = sum((spring.force(point.index) for spring in springs))
-            if rod.direction(rod.left.index).cross(force) < 1e-3:
-                # a force that is parallel or anti-parallel to the rod will produce no rotation
-                break
-            else:
-                # rotate by some angle due to moment
-                point.rotate(pivot, force)
-                # increase mass to dampen next rotation magnitude
-                point.mass += 1
-        point.mass = 1
-        return point
-
     def _add_triangle(self, cluster: Cluster, fig: Optional[Figure] = None):
         # cluster must already by in the visualized set
         if cluster.argcenter not in self.points:
@@ -272,9 +255,23 @@ class Visualizer:
             if cluster.argcenter == right.argcenter:  # cluster center is the same as a Right center
                 # rigid rod connects cluster and right and rotates about cluster. solve dynamical system.
                 # pick starting point for Right
-                self.points[right.argcenter] = Point(right.argcenter, pivot.x, pivot.y + cr)
+                point = self.points[right.argcenter] = Point(right.argcenter, pivot.x, pivot.y + cr)
                 self._add_springs(left), self._add_springs(right)
-                self._add_rod(pivot, self.points[right.argcenter])
+                # add Springs from Right
+                springs: List[Spring] = self._springs_from(point)
+                rod: Spring = self.springs[key(pivot.index, point.index)]
+                while True and point.mass < 1e3:  # rotate rod until moment is zero
+                    force: Vector = sum((spring.force(point.index) for spring in springs))
+                    if rod.direction(rod.left.index).cross(force) < 1e-3:
+                        # a force that is parallel or anti-parallel to the rod will produce no rotation
+                        break
+                    else:
+                        # rotate by some angle due to moment
+                        point.rotate(pivot, force)
+                        # increase mass to dampen next rotation magnitude
+                        point.mass += 1
+                point.mass = 1
+
                 self.draw(fig, text=f'added and rotated rod with pivot {pivot.index} and point {right.argcenter}')
                 # TODO: 3-d rotational dynamics of rigid bar rotating about one end
                 return
@@ -337,6 +334,22 @@ class Visualizer:
                 left_point: Point = Point(left.argcenter, pivot.x + cl * cos_theta, pivot.y + cl * sin_theta)
                 self.points.update({left.argcenter: left_point, right.argcenter: right_point})
                 self._add_springs(left), self._add_springs(right)
+
+                while True:
+                    cl_vec: Vector = left_point.vector - pivot.vector
+                    force_left: Vector = sum((spring.force(left_point.index) for spring in self._springs_from(left_point)))
+                    moment_left: float = cl_vec.cross(force_left)
+
+                    cr_vec: Vector = right_point.vector - pivot.vector
+                    force_right: Vector = sum((spring.force(right_point.index) for spring in self._springs_from(right_point)))
+                    moment_right: float = cr_vec.cross(force_right)
+
+                    if moment_left + moment_right <= 0 or right_point.mass < 1e3:
+                        break
+                    else:
+                        if __name__ == '__main__':
+                            force: float = (moment_left + moment_right) / cr_vec.magnitude
+                            exit(1)
 
                 # figure out translation of force from acting on left point to acting on the right point
                 # rotate right point using the resultant force, then recover left point
