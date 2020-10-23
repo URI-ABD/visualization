@@ -172,8 +172,9 @@ class Spring:
         return direction * (1 if anchor == self.left.index else -1) * (1 / direction.magnitude)
 
     def force(self, anchor: int) -> Vector:
+        """ Returns the force acting on the anchor. """
         if anchor not in [self.left.index, self.right.index]:
-            raise ValueError(f'Direction must be anchored at one end of the spring. Got {anchor} instead.')
+            raise ValueError(f'Force must act at one end of the spring. Got {anchor} instead.')
         return self.direction(anchor) * -self.stiffness * (self.length - self.rest_length)
 
     def draw(self, ax: Axes):
@@ -206,6 +207,21 @@ class Visualizer:
          for candidate, distance in cluster.candidates.items()
          if candidate.argcenter in self.points and distance <= cluster.radius + candidate.radius]
         return
+
+    def _neighbors(self, start: Point, path_length: int) -> Set[Point]:
+        neighbors: Set[Point] = set()
+        frontier: Set[Point] = {start}
+        for _ in range(path_length):
+            neighbors.update(frontier)
+            next_points: Set[Point] = set()
+            [next_points.update({spring.left, spring.right})
+             for point in frontier
+             for spring in self._springs_from(point)]
+            frontier = next_points
+        else:
+            neighbors.update(frontier)
+
+        return neighbors
 
     def _add_triangle(self, cluster: Cluster, fig: Optional[Figure] = None):
         # cluster must already by in the visualized set
@@ -260,7 +276,7 @@ class Visualizer:
                 # add Springs from Right
                 springs: List[Spring] = self._springs_from(point)
                 rod: Spring = self.springs[key(pivot.index, point.index)]
-                while True and point.mass < 1e3:  # rotate rod until moment is zero
+                while point.mass < 1e3:  # rotate rod until moment is zero
                     force: Vector = sum((spring.force(point.index) for spring in springs))
                     if rod.direction(rod.left.index).cross(force) < 1e-3:
                         # a force that is parallel or anti-parallel to the rod will produce no rotation
@@ -335,6 +351,8 @@ class Visualizer:
                 self.points.update({left.argcenter: left_point, right.argcenter: right_point})
                 self._add_springs(left), self._add_springs(right)
 
+                # figure out translation of force from acting on left point to acting on the right point
+                # rotate right point using the resultant force, then recover left point
                 while True:
                     cl_vec: Vector = left_point.vector - pivot.vector
                     force_left: Vector = sum((spring.force(left_point.index) for spring in self._springs_from(left_point)))
@@ -345,15 +363,20 @@ class Visualizer:
                     moment_right: float = cr_vec.cross(force_right)
 
                     if moment_left + moment_right <= 0 or right_point.mass < 1e3:
+                        # loop until net torque after translation is nearly zero
                         break
                     else:
-                        if __name__ == '__main__':
-                            force: float = (moment_left + moment_right) / cr_vec.magnitude
-                            exit(1)
+                        force_magnitude: float = (moment_left + moment_right) / cr_vec.magnitude
+                        force_right: Vector = cr_vec.perpendicular * (force_magnitude / cr_vec.magnitude)
+                        right_point = right_point.rotate(pivot, force_right)
+                        force_left: Vector = cl_vec.perpendicular * (force_magnitude / cl_vec.magnitude)
+                        left_point = left_point.rotate(pivot, force_left)
+                        right_point.mass += 1
+                        left_point.mass += 1
+                        self.draw(fig, text=f'rotated triangle: {left.argcenter}, {right.argcenter}. Triangle inequality holds')
 
-                # figure out translation of force from acting on left point to acting on the right point
-                # rotate right point using the resultant force, then recover left point
-                # loop until net torque after translation is nearly zero
+                right_point.mass = 1
+                left_point.mass = 1
                 self.draw(fig, text=f'two new points added: {left.argcenter}, {right.argcenter}. Triangle inequality holds')
 
             # TODO: 3-D solve rotational dynamics of rigid triangle anchored at one vertex
@@ -365,10 +388,22 @@ class Visualizer:
     def _local_optimization(self, cluster: Cluster, path_length: int, fig: Optional[Figure] = None):
         # find all points within path_length of children of cluster
         # these points are the active points
-        # determine proper step_size for 1 unit of force
-        # find and aggregate forces for each active point and move each active point by the resultant force
-        # loop until all resultants are nearly zero
-        pass
+        active_points: List[Point] = list(self._neighbors(self.points[cluster.argcenter], path_length))
+        masses: List[float] = [point.mass for point in active_points]
+        for point in active_points:
+            point.mass = 1
+        while active_points[0].mass < 1e3:
+            forces: List[Vector] = [sum([spring.force(point.index) for spring in self._springs_from(point)]) for point in active_points]
+            # find and aggregate forces for each active point and move each active point by the resultant force
+            if sum(forces) < 1e-3:
+                break
+            [point.move(force) for point, force in zip(active_points, forces)]
+            for point in active_points:
+                point.mass += 1
+            self.draw(fig, text=f'Performing local optimization on {[point.index for point in active_points]}, step: {active_points[0].mass}')
+        for point, mass in zip(active_points, masses):
+            point.mass = mass
+        return
 
     def _global_optimize(self, fig: Optional[Figure] = None):
         # from each spring, aggregate the forces on each point.
@@ -389,7 +424,7 @@ class Visualizer:
                 self._add_triangle(cluster, fig)
                 # return
                 # after replacing each triangle, perform some local optimizations from replaced cluster.
-                [self._local_optimization(cluster, d, fig) for d in range(1, depth + 1)]
+                [self._local_optimization(cluster, d, fig) for d in range(depth + 1)]
             # after replacing each layer, perform global optimization for some number of steps.
             self._global_optimize(fig)
         pass
